@@ -1,0 +1,15 @@
+{git,
+ [{"16.03.4-686-g999740b",
+   [{add_module,easemob_metrics_log},
+    {add_module,easemob_metrics_statistic},
+    {add_module,easemob_statistic_collector},
+    {load_module,easemob_redis},
+    {load_module,message_store_app},
+    {apply,{easemob_metrics_statistic, start, []}}]}],
+ [{"16.03.4-686-g999740b",
+   [{load_module,message_store_app},
+    {load_module,easemob_redis},
+    {delete_module,easemob_statistic_collector},
+    {delete_module,easemob_metrics_statistic},
+    {delete_module,easemob_metrics_log}]}]}
+.

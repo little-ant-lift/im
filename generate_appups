@@ -1,0 +1,356 @@
+#! /usr/bin/env escript
+-compile([export_all]).
+-mode(compile).
+-include_lib ("kernel/include/file.hrl").
+-record(app,{name, dir, ver, props}).
+%% assuming the current working directory is a OTP application
+%% directory structure.
+main([CurrentReleaseDir, OriginalReleaseDir]) ->
+    CurrentApps = read_apps(CurrentReleaseDir),
+    OriginalApps = read_apps(OriginalReleaseDir),
+    NewApps = [ App
+                || App <- CurrentApps,
+                   is_new_app(App, OriginalApps) ],
+    AbsoleteApps = [ App
+                     || App <- OriginalApps,
+                        is_new_app(App, CurrentApps) ],
+    UpgradedApps = upgraded_apps(CurrentApps,OriginalApps),
+    AppupsDirectives = lists:map(fun generate_appup/1, UpgradedApps),
+    lists:foreach(fun write_output/1 , lists:zip(AppupsDirectives, UpgradedApps)),
+    io:format("~p ~p ~p~n",[NewApps, AbsoleteApps,  AppupsDirectives]).
+
+
+write_output({Appup, {CurrentApp, _}}) ->
+    FileName = atom_to_list(CurrentApp#app.name) ++ ".appup.src",
+    X = file:write_file(FileName, io_lib:format("~p~n", [Appup])),
+    io:format("writing to ~s ~p.~n", [FileName, X]),
+    X.
+
+
+
+generate_appup({CurrentApp, EarlierApps}) ->
+    AppUpDirectives=
+        [ make_appup(CurrentApp, EarlierApp) ||
+            EarlierApp <- EarlierApps ],
+    AppUp = {
+      CurrentApp#app.ver,
+      [ U || {U, _} <- AppUpDirectives ],
+      [ D || {_, D} <- AppUpDirectives ]},
+    AppUp.
+
+
+
+
+read_apps(Dir) ->
+    Pattern = filename:join([Dir, "lib", "*", "ebin", "*.app"]),
+    io:format("reading apps from ~s~n",[Pattern]),
+    [
+     read_app(AppFile)
+     || AppFile <- filelib:wildcard(Pattern)].
+
+
+upgraded_apps(CurrentApps,OriginalApps) ->
+    lists:filtermap(
+      fun(CurrentApp) ->
+         case lists:filtermap(
+                fun(OriginApp) ->
+                        case (CurrentApp#app.name =:= OriginApp#app.name andalso
+                              CurrentApp#app.ver =/= OriginApp#app.ver) of
+                            true -> {true, OriginApp};
+                            false  -> false
+                        end
+                end, OriginalApps) of
+             [] ->
+                 false;
+             Apps when is_list(Apps)->
+                 {true, {CurrentApp, Apps}}
+         end
+      end, CurrentApps).
+
+is_new_app(App, Apps) ->
+    case [ A || A <- Apps,
+                App#app.name == A#app.name ] of
+        [] -> true;
+        _ -> false
+    end.
+
+
+
+%%-=====================================================================-
+%%-                               Private                               -
+%%-=====================================================================-
+
+beam_exports (Beam, Func, Arity) ->
+    case beam_lib:chunks (Beam, [ exports ]) of
+        { ok, { _, [ { exports, Exports } ] } } ->
+            lists:member ({ Func, Arity }, Exports);
+        _ ->
+            false
+    end.
+
+
+downgrade_directives (EarlierVersion, LaterVersion, M, Beam) ->
+    case is_supervisor (Beam) of
+        true ->
+            downgrade_directives_supervisor (EarlierVersion, LaterVersion, M, Beam);
+        false ->
+            case has_code_change (Beam) of
+                true  -> [ { update, M, infinity, { advanced, [] }, brutal_purge, brutal_purge, [] } ];
+                false -> [ { load_module, M } ]
+            end
+    end.
+
+downgrade_directives_supervisor (EarlierVersion, LaterVersion, M, Beam) ->
+    case beam_exports (Beam, sup_downgrade_notify, 2) of
+        true ->
+            [ { apply,
+                { M, sup_downgrade_notify, [ EarlierVersion, LaterVersion ] } },
+              { update, M, supervisor } ];
+        false ->
+            [ { update, M, supervisor } ]
+    end.
+
+has_code_change (Beam) ->
+    beam_exports (Beam, code_change, 3).
+
+has_element (Attr, Key, Elem) ->
+    case lists:keysearch (Key, 1, Attr) of
+        { value, { Key, Value } } ->
+            lists:member (Elem, Value);
+        _ ->
+            false
+    end.
+
+has_version_change (Beam) ->
+    beam_exports (Beam, version_change, 2).
+
+is_supervisor (Beam) ->
+    case beam_lib:chunks (Beam, [ attributes ]) of
+        { ok, { _, [ { attributes, Attr } ] } } ->
+            has_element (Attr, behaviour, supervisor) orelse
+                has_element (Attr, behavior, supervisor);
+        _ ->
+            false
+    end.
+
+module_vsn(Beam) ->
+    case beam_lib:chunks (Beam, [ attributes ]) of
+        { ok, { _, [ { attributes, Attr } ] } } ->
+            _Vsn = proplists:get_value(vsn, Attr, erlang:unique_integer())
+    end.
+
+local_info_msg (Format, Args) ->
+    Leader = erlang:group_leader (),
+    try
+        true = erlang:group_leader (self (), self ()),
+        error_logger:info_msg (Format, Args)
+    after
+        erlang:group_leader (Leader, self ())
+    end.
+
+make_appup (CurrentApp, EarlierApp) ->
+    %% Application = CurrentApp#app.name,
+    EarlierVersion = EarlierApp#app.ver,
+    EarlierDir =  EarlierApp#app.dir,
+    EarlierProps = EarlierApp#app.props,
+    LaterVersion = CurrentApp#app.ver,
+    LaterDir = CurrentApp#app.dir,
+    LaterProps = CurrentApp#app.props,
+    AddMods = modules (LaterProps) -- modules (EarlierProps),
+    DelMods = modules (EarlierProps) -- modules (LaterProps),
+    SameMods = modules (LaterProps) -- AddMods,
+    UnchangedMods = [M || M <- SameMods,
+                          BeamFileLater <- [ LaterDir ++ "/ebin/" ++ atom_to_list (M) ++ ".beam" ],
+                          BeamFileEarlier <- [ EarlierDir ++ "/ebin/" ++ atom_to_list (M) ++ ".beam" ],
+                          %% begin io:format("~p~n",[{BeamFileLater, BeamFileEarlier}]), true end,
+                          { ok, BeamLater } <- [ file:read_file (BeamFileLater) ],
+                          { ok, BeamEarlier } <- [ file:read_file (BeamFileEarlier) ],
+                          module_vsn(BeamEarlier) =:= module_vsn(BeamLater) ],
+
+    %% io:format("AddMods = ~p, DelMods = ~p UnchangedMods = ~p, ~p~n", [AddMods, DelMods, UnchangedMods, SameMods]),
+    { UpVersionChange, DownVersionChange } =
+        case start_module (LaterProps) of
+            { ok, StartMod, StartArgs } ->
+                StartModBeamFile =
+                    LaterDir ++ "/ebin/" ++ atom_to_list (StartMod) ++ ".beam",
+                { [ D
+                    || { ok, Beam } <- [ file:read_file (StartModBeamFile) ],
+                       D <- version_change (Beam,
+                                            EarlierVersion,
+                                            StartMod,
+                                            StartArgs) ],
+                  [ D
+                    || { ok, Beam } <- [ file:read_file (StartModBeamFile) ],
+                       D <- version_change (Beam,
+                                            { down, EarlierVersion },
+                                            StartMod,
+                                            StartArgs) ] };
+            undefined ->
+                { [], [] }
+        end,
+
+    UpDirectives =
+        [ D
+          || M <- (modules (LaterProps) -- AddMods) -- UnchangedMods,
+             BeamFile <- [ LaterDir ++ "/ebin/" ++ atom_to_list (M) ++ ".beam" ],
+             { ok, Beam } <- [ file:read_file (BeamFile) ],
+             D <- upgrade_directives (EarlierVersion, LaterVersion, M, Beam) ],
+
+    DownDirectives =
+        [ D
+          || M <- lists:reverse ((modules (LaterProps) -- AddMods) -- UnchangedMods),
+             BeamFile <- [ LaterDir ++ "/ebin/" ++ atom_to_list (M) ++ ".beam" ],
+             { ok, Beam } <- [ file:read_file (BeamFile) ],
+             D <- downgrade_directives (EarlierVersion, LaterVersion, M, Beam) ],
+
+    _AppUp = {
+      { EarlierVersion,
+        [ { add_module, M } || M <- AddMods ]
+        ++ UpDirectives
+        ++ UpVersionChange
+        ++ [ { delete_module, M } || M <- DelMods ]
+      },
+      { EarlierVersion,
+        [ { add_module, M } || M <- lists:reverse (DelMods) ]
+        ++ DownVersionChange
+        ++ DownDirectives
+        ++ [ { delete_module, M } || M <- lists:reverse (AddMods) ]
+      }
+     }.
+
+modules (Props) ->
+    { value, { modules, Modules } } = lists:keysearch (modules, 1, Props),
+    Modules.
+
+start_module (Props) ->
+    case lists:keysearch (mod, 1, Props) of
+        { value, { mod, { StartMod, StartArgs } } } ->
+            { ok, StartMod, StartArgs };
+        false ->
+            undefined
+    end.
+
+upgrade_directives (EarlierVersion, LaterVersion, M, Beam) ->
+    case is_supervisor (Beam) of
+        true ->
+            upgrade_directives_supervisor (EarlierVersion, LaterVersion, M, Beam);
+        false ->
+            case has_code_change (Beam) of
+                true  -> [ { update, M, infinity, { advanced, [] }, brutal_purge, brutal_purge, [] } ];
+                false -> [ { load_module, M } ]
+            end
+    end.
+
+upgrade_directives_supervisor (EarlierVersion, LaterVersion, M, Beam) ->
+    case beam_exports (Beam, sup_upgrade_notify, 2) of
+        true ->
+            [ { update, M, supervisor },
+              { apply,
+                { M, sup_upgrade_notify, [ EarlierVersion, LaterVersion ] } } ];
+        false ->
+            [ { update, M, supervisor } ]
+    end.
+
+version_change (Beam, From, StartMod, StartArgs) ->
+    case has_version_change (Beam) of
+        true ->
+            [ { apply, { StartMod, version_change, [ From, StartArgs ] } } ];
+        false ->
+            []
+    end.
+
+vsn (Props) ->
+    { value, { vsn, Vsn } } = lists:keysearch (vsn, 1, Props),
+    Vsn.
+
+read_config() ->
+    case file:consult("makeappup.config") of
+        {ok, Config} ->
+            Config;
+        {error, Reason} ->
+            error_msg("cannot read makeappup.config. Reason = ~p, Pwd = ~p~n",
+                      [Reason, erlang:element(2,file:get_cwd())]),
+            erlang:halt(1)
+    end.
+check_config(Config) ->
+    try
+        EarlierVersions =  proplists:get_value(earlier_versions, Config, undefined),
+        {true, _} = { is_list(EarlierVersions), "earlier_versions is not defined" },
+        LibDir = os:getenv("ERL_MAKE_APPUP_LIB_DIR"), %proplists:get_value(lib_dir, Config, undefined),
+        {true, _} = { is_list(LibDir), "env ERL_MAKE_APPUP_LIB_DIR is not defined" },
+        {true, _} = { filelib:is_dir(LibDir), "lib_dir " ++ LibDir ++ " is not a directory" },
+        {EarlierVersions, LibDir}
+    catch
+        error:{badmatch, {false, Msg}} ->
+            error_msg("check_config error: ~s~nConfig=~p~n",[Msg,Config]),
+            erlang:halt(1)
+    end.
+
+read_app() ->
+    case filelib:wildcard("ebin/*.app") of
+        [AppFile] ->
+            read_app(AppFile);
+        OtherWise ->
+            error_msg("cannot find app file. OtherWise = ~p, Pwd = ~p~n",
+                      [OtherWise, erlang:element(2,file:get_cwd())]),
+            erlang:halt(1)
+    end.
+read_app(AppName, EarlierVersion, LibDir) ->
+    AppFile =  filename:join([LibDir,
+                              atom_to_list(AppName) ++ "-" ++ EarlierVersion, "ebin",
+                              atom_to_list(AppName) ++ ".app"]),
+    read_app(AppFile).
+read_app(AppFile) ->
+    case file:consult(AppFile) of
+        {ok, [Config]} ->
+            {AppName, Props} = check_app(Config),
+            #app{ name = AppName,
+                  dir = filename:dirname(filename:dirname(AppFile)),
+                  ver = proplists:get_value(vsn, Props,undefined),
+                  props = Props};
+        {error, Reason} ->
+            error_msg("cannot read " ++ AppFile ++ ". Reason = ~p, Pwd = ~p~n",
+                      [Reason, erlang:element(2,file:get_cwd())]),
+            erlang:halt(1)
+    end.
+
+check_app(Config) ->
+    try
+        {application, AppName, Props} = Config,
+        {AppName, Props}
+    catch
+        error:{badmatch, {false, Msg}} ->
+            error_msg("check_config error: ~s~nConfig=~p~n",[Msg,Config]),
+            erlang:halt(1)
+    end.
+
+error_msg(Format, Args) ->
+    %% https://github.com/erlang/otp/pull/807
+    %% a workaround mer
+    timer:sleep(100),
+    io:format(standard_error,Format,Args).
+
+    %% Stderr = open_port ({ fd, 0, 2 }, [ out ]),
+    %% port_command
+    %%   (Stderr,
+    %%    io_lib:format (Format, Args)).
+
+cwd() ->
+    {ok, CWD} = file:get_cwd(),
+    CWD.
+
+replace_ver(X,X) ->
+    '$git';
+replace_ver(List, X)
+  when(is_list(List)) ->
+    lists:map(fun (E) -> replace_ver(E,X) end, List);
+replace_ver(Tuple, X)
+  when(is_tuple(Tuple)) ->
+    list_to_tuple(lists:map(fun (E) -> replace_ver(E,X) end, tuple_to_list(Tuple)));
+replace_ver(Other, _X) ->
+    Other.
+
+%% Local Variables:
+%% mode:erlang
+%% coding: nil
+%% End:

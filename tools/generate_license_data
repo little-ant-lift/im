@@ -1,0 +1,14 @@
+#!/usr/bin/env escript
+main([PemFilename]) ->
+    Key = get_key(PemFilename),
+    BKey = term_to_binary(Key),
+    io:format("-module(ejabberd_license_data).~n"),
+    io:format("-export([data/0]).~n"),
+    io:format("data()->~n"),
+    io:format("binary_to_term(~p).~n",[BKey]).
+
+get_key(PemFilename) ->
+    {ok, PEM} = file:read_file(PemFilename),
+    [PemEntry] = public_key:pem_decode(PEM),
+    Key = public_key:pem_entry_decode(PemEntry),
+    Key.

@@ -1,0 +1,24 @@
+#!/usr/bin/env escript
+
+main(_) ->
+    {ok, Pwd} = file:get_cwd(),
+    code:add_path(Pwd),
+    show_binary:init(),
+    _B = <<"line1: 0123456789abcdef."
+           "line2: 0123456789abcdef."
+           "line3: 0123456789abcdef."
+           "line4: 0123456789abcdef."
+           "line5: 0123456789abcdef."
+         >>,
+    {binary, BI} = erlang:process_info(self(), binary),
+    io:format("~p~n", [BI]),
+    lists:foreach(
+      fun({Ptr, Size, _} ) ->
+              A = show_binary:show(Ptr, Size),
+              io:format("~s~n", [A])
+      end, BI).
+
+%% Local Variables:
+%% mode:erlang
+%% coding: utf-8-unix
+%% End:

@@ -1,0 +1,94 @@
+%% -*- mode: erlang -*-
+%% ex: ft=erlang
+
+DepRequiredApps = [
+                   cuesport, eredis, etcp_server, goldrush, gpb, lager, mochiweb, p1_mysql, p1_stringprep, p1_utils, p1_xml
+                  , jsx
+                  , ticktick, ekaf, gproc, kafkamocker, ranch, thrift
+                  , poolboy
+                   , brod
+                   , supervisor3
+                   , kafka_protocol
+                   , im_worker
+                   , erl_om
+                   , lhttpc, etcdc
+                   , recon
+                   , snappyer
+                   , prometheus
+                  ],
+
+ImLibsApps = [   message_store , msync_proto, im_thrift, im_redis, im_alarm_handler ],
+
+DepConfiguredApps = [],
+
+DepApps = DepRequiredApps ++ DepConfiguredApps,
+
+%%AppConfigFile0 = "../test/" ++ net_adm:localhost() ++ ".ct.config",
+%%AppConfigFile = case filelib:is_regular(AppConfigFile0) of
+%%                    true ->
+%%                        AppConfigFile0;
+%%                    false ->
+%%                        "../test/zhaoyun.ct.config"
+%%                end,
+
+AppConfigFile = "../test/sys_docker.config",
+Config = "../test/config.sh",
+
+[{sys, [
+        {lib_dirs, []},
+        {erts, [{mod_cond, derived}, {app_file, strip}]},
+        {app_file, strip},
+        {rel, "msync", {cmd, "env bash ../get_git_ver_string.sh"},
+         [
+          kernel,
+          stdlib,
+          sasl,
+          os_mon,
+          msync
+         ] ++ DepRequiredApps
+        },
+        {rel, "start_clean", "",
+         [
+          kernel,
+          stdlib
+         ]},
+        {boot_rel, "msync"},
+        {profile, embedded},
+        {incl_cond, derived},
+        {excl_archive_filters, [".*"]}, %% Do not archive built libs
+        {excl_sys_filters, ["^bin/(?!start_clean.boot)",
+                            "^erts.*/bin/(dialyzer|typer)",
+                            "^erts.*/(doc|info|include|lib|man|src)"]},
+        {excl_app_filters, ["\.gitignore"]},
+        {app, msync, [{mod_cond, app},
+                      {incl_cond, include},
+                      {lib_dir, ".."}
+                     ]}
+       ] ++ lists:map(
+              fun(App) ->
+                      {app, App, [{incl_cond, include},
+                                  {lib_dir, "../deps/" ++ atom_to_list(App)}]}
+              end, DepApps)
+  ++  lists:map(
+        fun(App) ->
+                {app, App, [{incl_cond, include},
+                            {lib_dir, "../deps/im_libs/apps/" ++ atom_to_list(App)}]}
+        end, ImLibsApps)
+ } ,
+ {target_dir, "msync"},
+ {overlay, [
+            {mkdir, "log/sasl"},
+            {copy, "files/erl", "\{\{erts_vsn\}\}/bin/erl"},
+            {copy, "files/nodetool", "releases/\{\{rel_vsn\}\}/nodetool"},
+            {copy, "msync/bin/start_clean.boot",
+             "\{\{erts_vsn\}\}/bin/start_clean.boot"},
+            {copy, "files/msync", "bin/msync"},
+            {copy, "files/msync.cmd", "bin/msync.cmd"},
+            {copy, "files/start_erl.cmd", "bin/start_erl.cmd"},
+            %% Following line may be safely removed in new projects
+            {copy, "files/install_upgrade.escript", "bin/install_upgrade.escript"},
+            {copy, AppConfigFile, "etc/app.config"},
+            {copy, Config, "etc/config.sh"},
+            {copy, "files/vm.args", "etc/vm.args"}
+           ]}
+].

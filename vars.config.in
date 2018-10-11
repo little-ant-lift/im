@@ -1,0 +1,18 @@
+%%%-------------------------------------------------------------------
+%%% @author Wang Chunye <wcy123@gmail.com>
+%%% @copyright (C) 2013, Wang Chunye
+%%% @doc
+%%%
+%%% @end
+%%% Created :  2015/10/11 20:38:28
+%%%-------------------------------------------------------------------
+{debug, @debug@}.
+{shard, @shard@}.
+{hipe, @hipe@}.
+{license, @license@}.
+{initial_license_time, @INITIAL_LICENSE_TIME@}.
+
+%% Local Variables:
+%% mode: erlang
+%% End:
+%% vim: set filetype=erlang tabstop=8:
